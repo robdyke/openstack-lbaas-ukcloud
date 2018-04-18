@@ -1,0 +1,247 @@
+### Heat Template ###
+description: Generated template
+heat_template_version: 2013-05-23
+parameters:
+  router_name:
+    description: Name of the router to connect to
+    type: string
+  external_network_for_floating_ip:
+    description: Network to allocate floating IP from
+    type: string
+  router_external_network:
+    description: Router external network
+    type: string
+  network_name:
+    description: Name of the network the loadbalancer subnet will exist in
+    type: string
+  subnet_name:
+    description: Name of subnet the loadbalancers will sit in
+    type: string
+  subnet_cidr:
+    type: string
+    description: The network CIDR for loadbalancer network
+  subnet_allocation_start:
+    type: string
+    description: The start of the allocation pool
+  subnet_allocation_end:
+    type: string
+    description: The end of the allocation pool
+  dns_server:
+    default: 8.8.8.8
+    description: dns server ip
+    type: string
+  server_flavor:
+    default: t1.medium
+    description: Flavor to use for loadbalancer servers
+    type: string
+  server_image:
+    description: Image to use to boot loadbalancer servers
+    type: string
+  server_key:
+    description: Key Pair to be used for servers
+    type: string
+  server_name:
+    description: Name of servers. Will be prefixed suffixed -1 / -2
+    type: string
+  keepalive_notify:
+    description: Email address to recieve notification emails
+    type: string
+  keepalive_smtp:
+    description: SMTP IP address
+    type: string
+  keepalive_from:
+    description: Email address from which noifications will be sent
+    type: string
+  keepalive_auth:
+    description: Password to secure VRRP communications
+    type: string
+  keepalive_router_id:
+    description: Unique VRRP router id
+    type: string
+  keepalive_router_name:
+    description: Descriptive name for router
+    type: string
+  availability_zone_1:
+    type: string
+    description: The Availability Zone to launch the first instance.
+    default: az00001
+  availability_zone_2:
+    type: string
+    description: The Availability Zone to launch the second instance.
+    default: az00002
+resources:
+  floatingip:
+    properties:
+      floating_network_id:
+        get_param: external_network_for_floating_ip
+    type: OS::Neutron::FloatingIP
+  network_0:
+    properties:
+      admin_state_up: true
+      name: { get_param: network_name }
+      shared: false
+    type: OS::Neutron::Net
+  router_0_interface_0:
+    properties:
+      router: { get_param: router_name }
+      subnet_id:
+        get_resource: subnet_0
+    metadata:
+      depends_on: floatingip
+    type: OS::Neutron::RouterInterface
+  vip_port:
+    properties:
+      network: { get_resource: network_0 }
+    metadata:
+      depends_on: network_0
+    type: OS::Neutron::Port
+  server_1_port:
+    properties:
+      network: { get_resource: network_0 }
+      allowed_address_pairs:
+        - ip_address:  { get_attr: [ vip_port, fixed_ips, 0, ip_address ] }
+      security_groups:
+        - default
+    metadata:
+      depends_on: network_0 vip_port
+    type: OS::Neutron::Port
+  server_2_port:
+    properties:
+      network: { get_resource: network_0 }
+      allowed_address_pairs:
+        - ip_address: { get_attr: [ vip_port, fixed_ips, 0, ip_address ] }
+      security_groups:
+        - default
+
+    metadata:
+      depends_on: network_0 vip_port
+    type: OS::Neutron::Port
+
+  server_1:
+    properties:
+      availability_zone: { get_param: availability_zone_1 }
+      diskConfig: AUTO
+      flavor:
+        get_param: server_flavor
+      image:
+        get_param: server_image
+      key_name:
+        get_param: server_key
+      name:
+        str_replace:
+          template: LB1%-sn%-1
+          params:
+            "LB1%" : LB1
+            "sn%" : { get_param: server_name }
+      networks:
+      - port: { get_resource: server_1_port }
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            apt-get update -y
+            echo "bash -c 'service snapd.boot-ok start'" | at now + 4 min
+            apt-get upgrade -y
+            apt-get install keepalived haproxy -y
+            cp /usr/share/doc/keepalived/samples/keepalived.conf.vrrp /etc/keepalived/keepalived.conf
+            sed -i '36,79d' /etc/keepalived/keepalived.conf
+            sed -i '27,33d' /etc/keepalived/keepalived.conf
+            sed -i '26 a $vipip' /etc/keepalived/keepalived.conf
+            instanceip=$(ifconfig | awk -F "[: ]+" '/inet addr:/ { if ($4 != "127.0.0.1") print $4 }')
+            interface=$(ip -4 -o a | grep "${instanceip}" | awk '{print $2}')
+            sed -i "s/eth0/${interface}/" /etc/keepalived/keepalived.conf
+            sed -i "s/1111/$auth/" /etc/keepalived/keepalived.conf
+            sed -i "s/51/$vrrpid/" /etc/keepalived/keepalived.conf
+            sed -i "s/acassen/$notify/" /etc/keepalived/keepalived.conf
+            sed -i "s/from Alexandre.Cassen@firewall.loc/$from/" /etc/keepalived/keepalived.conf
+            sed -i "s/192.168.200.1/$smtp/" /etc/keepalived/keepalived.conf
+            sed -i "s/LVS_DEVEL/$router_name/" /etc/keepalived/keepalived.conf
+            echo net.ipv4.ip_forward = 1 > /etc/sysctl.conf
+            echo net.ipv4.ip_nonlocal_bind = 1 >> /etc/sysctl.conf
+            sysctl -p
+            service keepalived restart
+          params:
+            $vipip: { get_attr: [ vip_port, fixed_ips, 0, ip_address ] }
+            $notify: { get_param: keepalive_notify }
+            $smtp: { get_param: keepalive_smtp }
+            $from: { get_param: keepalive_from }
+            $auth: { get_param: keepalive_auth }
+            $vrrpid: { get_param: keepalive_router_id }
+            $router_name: { get_param: keepalive_router_name }
+    type: OS::Nova::Server
+  server_2:
+    properties:
+      availability_zone: { get_param: availability_zone_2 }
+      diskConfig: AUTO
+      flavor:
+        get_param: server_flavor
+      image:
+        get_param: server_image
+      key_name:
+        get_param: server_key
+      name:
+        str_replace:
+          template: LB1%-sn%-2
+          params:
+            "LB1%" : LB1
+            "sn%" : { get_param: server_name }
+      networks:
+      - port: { get_resource: server_2_port }
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            apt-get update -y
+            echo "bash -c 'service snapd.boot-ok start'" | at now + 4 min
+            apt-get upgrade -y
+            apt-get install keepalived haproxy -y
+            cp /usr/share/doc/keepalived/samples/keepalived.conf.vrrp /etc/keepalived/keepalived.conf
+            sed -i '36,79d' /etc/keepalived/keepalived.conf
+            sed -i '27,33d' /etc/keepalived/keepalived.conf
+            sed -i '26 a $vipip' /etc/keepalived/keepalived.conf
+            instanceip=$(ifconfig | awk -F "[: ]+" '/inet addr:/ { if ($4 != "127.0.0.1") print $4 }')
+            interface=$(ip -4 -o a | grep "${instanceip}" | awk '{print $2}')
+            sed -i "s/eth0/${interface}/" /etc/keepalived/keepalived.conf
+            sed -i "s/1111/$auth/" /etc/keepalived/keepalived.conf
+            sed -i "s/51/$vrrpid/" /etc/keepalived/keepalived.conf
+            sed -i "s/acassen/$notify/" /etc/keepalived/keepalived.conf
+            sed -i "s/from Alexandre.Cassen@firewall.loc/$from/" /etc/keepalived/keepalived.conf
+            sed -i "s/192.168.200.1/$smtp/" /etc/keepalived/keepalived.conf
+            sed -i "s/LVS_DEVEL/$router_name/" /etc/keepalived/keepalived.conf
+            sed -i "s/100/90/" /etc/keepalived/keepalived.conf
+            sed -i "s/MASTER/BACKUP/" /etc/keepalived/keepalived.conf
+            echo net.ipv4.ip_forward = 1 > /etc/sysctl.conf
+            echo net.ipv4.ip_nonlocal_bind = 1 >> /etc/sysctl.conf
+            sysctl -p
+            service keepalived restart
+          params:
+            $vipip: { get_attr: [ vip_port, fixed_ips, 0, ip_address ] }
+            $notify: { get_param: keepalive_notify }
+            $smtp: { get_param: keepalive_smtp }
+            $from: { get_param: keepalive_from }
+            $auth: { get_param: keepalive_auth }
+            $vrrpid: { get_param: keepalive_router_id }
+            $router_name: { get_param: keepalive_router_name }
+    type: OS::Nova::Server
+  floatip:
+    properties:
+      floatingip_id: { get_resource: floatingip }
+      port_id: { get_resource: vip_port }
+    type: OS::Neutron::FloatingIPAssociation
+  subnet_0:
+    properties:
+      allocation_pools:
+      - end: { get_param: subnet_allocation_end }
+        start: { get_param: subnet_allocation_start }
+      cidr: { get_param: subnet_cidr }
+      dns_nameservers:
+      - { get_param: dns_server }
+      enable_dhcp: true
+      host_routes: []
+      ip_version: 4
+      name: { get_param: subnet_name }
+      network_id:
+        get_resource: network_0
+    type: OS::Neutron::Subnet
